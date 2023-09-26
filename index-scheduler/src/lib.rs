@@ -33,6 +33,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub type TaskId = u32;
 
 use std::collections::{BTreeMap, HashMap};
+use std::fs::File;
 use std::ops::{Bound, RangeBounds};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -52,6 +53,7 @@ use meilisearch_types::milli::documents::DocumentsBatchBuilder;
 use meilisearch_types::milli::update::IndexerConfig;
 use meilisearch_types::milli::{self, CboRoaringBitmapCodec, Index, RoaringBitmapCodec, BEU32};
 use meilisearch_types::tasks::{Kind, KindWithContent, Status, Task};
+use puffin::FrameView;
 use roaring::RoaringBitmap;
 use synchronoise::SignalEvent;
 use time::format_description::well_known::Rfc3339;
@@ -314,6 +316,9 @@ pub struct IndexScheduler {
     /// the finished tasks automatically.
     pub(crate) max_number_of_tasks: usize,
 
+    /// A frame to output the indexation profiling files to disk.
+    pub(crate) puffin_frame: Arc<puffin::GlobalFrameView>,
+
     /// The path used to create the dumps.
     pub(crate) dumps_path: PathBuf,
 
@@ -364,6 +369,7 @@ impl IndexScheduler {
             wake_up: self.wake_up.clone(),
             autobatching_enabled: self.autobatching_enabled,
             max_number_of_tasks: self.max_number_of_tasks,
+            puffin_frame: self.puffin_frame.clone(),
             snapshots_path: self.snapshots_path.clone(),
             dumps_path: self.dumps_path.clone(),
             auth_path: self.auth_path.clone(),
@@ -457,6 +463,7 @@ impl IndexScheduler {
             env,
             // we want to start the loop right away in case meilisearch was ctrl+Ced while processing things
             wake_up: Arc::new(SignalEvent::auto(true)),
+            puffin_frame: Arc::new(puffin::GlobalFrameView::default()),
             autobatching_enabled: options.autobatching_enabled,
             max_number_of_tasks: options.max_number_of_tasks,
             dumps_path: options.dumps_path,
@@ -1062,6 +1069,8 @@ impl IndexScheduler {
             self.breakpoint(Breakpoint::Start);
         }
 
+        let puffin_enabled = self.features()?.check_puffin().is_ok();
+        puffin::set_scopes_on(puffin_enabled);
         puffin::GlobalProfiler::lock().new_frame();
 
         self.cleanup_task_queue()?;
@@ -1070,7 +1079,24 @@ impl IndexScheduler {
         let batch =
             match self.create_next_batch(&rtxn).map_err(|e| Error::CreateBatch(Box::new(e)))? {
                 Some(batch) => batch,
-                None => return Ok(TickOutcome::WaitForSignal),
+                None => {
+                    // Let's write the previous frame to disk but only if
+                    // the user wanted to profile with puffin.
+                    if puffin_enabled {
+                        let mut frame_view = self.puffin_frame.lock();
+                        if !frame_view.is_empty() {
+                            let now = OffsetDateTime::now_utc();
+                            let mut file = File::create(format!("{}.puffin", now))?;
+                            frame_view.save_to_writer(&mut file)?;
+                            file.sync_all()?;
+                            // We erase this frame view as it is no more useful. We want to
+                            // measure the new frames now that we exported the previous ones.
+                            *frame_view = FrameView::default();
+                        }
+                    }
+
+                    return Ok(TickOutcome::WaitForSignal);
+                }
             };
         let index_uid = batch.index_uid().map(ToOwned::to_owned);
         drop(rtxn);
