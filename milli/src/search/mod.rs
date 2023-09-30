@@ -26,9 +26,6 @@ static LEVDIST0: Lazy<LevBuilder> = Lazy::new(|| LevBuilder::new(0, true));
 static LEVDIST1: Lazy<LevBuilder> = Lazy::new(|| LevBuilder::new(1, true));
 static LEVDIST2: Lazy<LevBuilder> = Lazy::new(|| LevBuilder::new(2, true));
 
-/// The maximum number of facets returned by the facet search route.
-const MAX_NUMBER_OF_FACETS: usize = 100;
-
 pub mod facet;
 mod fst_utils;
 pub mod new;
@@ -399,9 +396,6 @@ impl<'a> SearchForFacetValues<'a> {
                             .unwrap_or_else(|| left_bound.to_string());
                         results.push(FacetValueHit { value, count });
                     }
-                    if results.len() >= MAX_NUMBER_OF_FACETS {
-                        break;
-                    }
                 }
                 Ok(results)
             }
@@ -443,9 +437,6 @@ impl<'a> SearchForFacetValues<'a> {
                     .one_original_value_of(fid, &original, docids.min().unwrap())?
                     .unwrap_or_else(|| query.to_string());
                 results.push(FacetValueHit { value, count });
-            }
-            if results.len() >= MAX_NUMBER_OF_FACETS {
-                return Ok(ControlFlow::Break(()));
             }
         }
 
